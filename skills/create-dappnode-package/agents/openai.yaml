@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create DAppNode Package"
+  short_description: "Build and debug DAppNode packages"
+  default_prompt: "Use $create-dappnode-package to create and test a DAppNode package from a Docker image."
