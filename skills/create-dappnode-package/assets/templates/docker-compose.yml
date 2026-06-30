@@ -1,6 +1,6 @@
 version: "3.5"
 services:
-  my-package:
+  my-package.dnp.dappnode.eth:
     image: "my-package.dnp.dappnode.eth:0.1.0"
     build:
       context: .

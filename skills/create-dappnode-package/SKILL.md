@@ -23,7 +23,9 @@ produce an IPFS hash at the very end, when you publish a release.
 
 Use Docker and a reachable DAppNode with MCP enabled. MCP-only upload works with
 an MCP API key or admin session for `/mcp`; direct `/upload` requires an admin
-session cookie.
+session cookie. For large tarballs, you may call `POST /mcp` yourself with
+`curl` and the same bearer token your MCP client uses; see
+[references/upload-via-curl.md](references/upload-via-curl.md).
 
 Use the normal filesystem tools plus Bash, and the DAppNode MCP tools listed in
 the MCP sections below.
@@ -54,7 +56,8 @@ The DAppNode MCP server is usually exposed at `http://my.dappnode/mcp`, but
 use the exact origin (scheme + host + port) of the MCP connection you are
 configured to use. `Authorization: Bearer <MCP_API_KEY>` is scoped to `/mcp`
 only. `/upload` requires a normal admin session cookie, so MCP-key clients
-should upload dev image tarballs through the chunked MCP upload tools.
+should upload dev image tarballs through `/mcp`, either with the MCP upload
+tools or with a direct `curl` driver.
 
 All `dappnode_*` tools below are served by that MCP. Before calling any of
 them, make sure you are connected to the DAppNode MCP; if you are not,
@@ -68,9 +71,23 @@ This keeps the whole flow inside `POST /mcp` and works for agents that cannot
 make a separate authenticated request to the node. Direct `/upload` remains
 available only when you have an admin session cookie.
 
+Important upload limitation: the DAppManager currently allows raw chunks up to
+1 MiB. A full-size chunk becomes about 1.4 MiB of base64 on one JSON line, which
+many agent environments cannot read back or pass through tool-call output caps.
+If you are driving the upload from code, call `POST /mcp` directly with `curl`
+and stream each JSON-RPC body through stdin instead of trying to round-trip the
+base64 through the model. If you must use model-visible MCP tool calls, choose
+small raw chunks yourself, such as 16 KiB; the server accepts any non-empty chunk
+up to its advertised maximum, but many calls will be slow. If that is still too
+heavy, note it as a DAppManager MCP improvement: a begin/upload option that
+advertises a smaller `chunkSizeBytes` would make model-driven uploads easier.
+
 If no bearer token exists yet, generate one in the DAppNode admin UI under
 **System > Advanced > MCP API key**. That UI can also revoke or rotate the
-token at any time.
+token at any time. The token storage path is MCP-client-specific. Some clients
+store it in local config; for example, if you are using opencode, look in
+`~/.config/opencode/opencode.jsonc` for the MCP server bearer token. Treat that
+as a client example, not a DAppNode rule.
 
 ## Package anatomy
 
@@ -79,13 +96,14 @@ my-package/
 ├── dappnode_package.json   # manifest (required) — metadata + DAppNode config
 ├── docker-compose.yml      # compose (required) — services, volumes, networks
 ├── Dockerfile              # only if you build the image yourself
-└── setup-wizard.yml        # optional — install-time user inputs (env/ports/files)
+├── setup-wizard.yml        # optional — install-time user inputs (env/ports/files)
+└── Makefile                # optional — dev build/tag/save helper
 ```
 
 Copy-paste starting points are bundled with this skill in
 [assets/templates/](assets/templates/): `dappnode_package.json`,
-`docker-compose.yml`, `Dockerfile`, `setup-wizard.yml`. Start from those and
-edit.
+`docker-compose.yml`, `Dockerfile`, `setup-wizard.yml`, `Makefile`. Start from
+those and edit.
 
 Package name is an ENS name: `<name>.dnp.dappnode.eth` (community) or
 `<name>.public.dappnode.eth`.
@@ -149,6 +167,10 @@ exposeByDefault? }` HTTPS services the user can expose over the public
 - `categories` is an enum (Blockchain, Communications, Developer tools, ETH2.0,
   Economic incentive, Monitoring, Payment channels, Storage, Lido, DVT, LSD, AI,
   MCP). Using a non-enum category fails validation.
+- Some DAppNode versions/tooling may mention a manifest `tags` array for
+  UI/release behavior, such as suppressing update prompts during development.
+  Support is schema/version dependent. Add it only when you know the connected
+  DAppManager accepts it, and let `dappnode_validate_package` decide.
 - Metadata: `author`/`contributors` must follow `Name <email> (githubUrl)`;
   `links` (`homepage`/`ui`/`api`/`gateway` get icons, others shown plain),
   `repository` (`{ type, url }`), `bugs` (`{ url }`), `keywords`, `style`.
@@ -163,9 +185,11 @@ It's a normal compose file, but DAppNode enforces these constraints (all checked
 by the `dappnode_validate_package` MCP tool):
 
 - **Compose version ≥ 3.4** (`version: "3.5"` is typical).
-- **Image tag must match the manifest**: `<service>.<dnpName>:<version>`, e.g.
-  `my-package.dnp.dappnode.eth:0.1.0`. For multi-service packages, prefix with
-  the service name: `beacon.my-package.dnp.dappnode.eth:0.1.0`.
+- **Image tag must match the manifest and compose service key**:
+  `<service>.<dnpName>:<version>`, e.g.
+  `api.my-package.dnp.dappnode.eth:0.1.0`. The only time the service prefix is
+  omitted is when the compose service key is exactly the full `dnpName`; then
+  the tag is `<dnpName>:<version>`.
 - **Networks**: only the whitelisted external networks are allowed
   (`dncore_network`, `dnprivate_network`, `dnpublic_network`) and they must be
   `external: true`. Most packages omit `networks` entirely and let DAppNode wire
@@ -186,7 +210,7 @@ Minimal single-service example:
 ```yaml
 version: "3.5"
 services:
-  my-package:
+  my-package.dnp.dappnode.eth:
     image: "my-package.dnp.dappnode.eth:0.1.0"
     build:
       context: .
@@ -301,8 +325,8 @@ step.
 ### 1. Scaffold the package
 
 Create a directory and copy the templates. Edit `dappnode_package.json`,
-`docker-compose.yml`, and `Dockerfile` (or use a public `image:`) to match the
-service you are packaging.
+`docker-compose.yml`, `Makefile`, and `Dockerfile` (or use a public `image:`)
+to match the service you are packaging.
 
 ### 2. Validate locally with Docker
 
@@ -323,30 +347,51 @@ Read the logs. If the container exits or restarts, fix the code/compose/env and
 repeat this step. Confirm the service actually responds (`curl`, browser, health
 endpoint) before moving on.
 
-**Image tag check:** before saving the tarball, verify the built image is tagged
-exactly `<service>.<dnpName>:<version>` (single-service packages may omit the
-`<service>.` prefix). DAppNode requires this tag. If `docker images` shows a
-different tag, rebuild or re-tag with `docker tag <current> <required>`.
+**Image tag pre-flight:** before saving the tarball, compute the required tag
+from the compose service key, manifest name, and manifest version:
+`<service>.<dnpName>:<version>`, except when `service == dnpName`, where it is
+`<dnpName>:<version>`. If `docker images` shows a different tag, re-tag the
+built image and verify the exact tag exists:
+
+```bash
+docker tag <current-tag> <required-tag>
+docker images --format '{{.Repository}}:{{.Tag}}' | grep -Fx '<required-tag>'
+```
 
 ### 3. Validate against DAppNode rules
 
-Call `dappnode_validate_package` with the raw contents of
+Call `dappnode_validate_package` with the raw string contents of
 `dappnode_package.json`, `docker-compose.yml` and (if present)
 `setup-wizard.yml`. Fix every error it reports, then re-run local validation.
+
+Pass `manifest` as the raw JSON string, not as an already-parsed object. Some
+MCP client/dispatcher paths have reported misleading schema errors such as
+`upstream.type must be array` or `categories.type must be array` when the same
+valid manifest is passed as an object. The raw-string path is the reliable one.
 
 ### 4. Build and save the DAppNode image
 
 ```bash
 docker compose build
-docker save <service>.<dnpName>:<version> -o <dnpName>.tar
+docker tag <current-tag> <required-tag>
+docker images --format '{{.Repository}}:{{.Tag}}' | grep -Fx '<required-tag>'
+docker save <required-tag> -o <dnpName>.tar
+shasum -a 256 <dnpName>.tar
 ```
 
-The image tag MUST be exactly `<service>.<dnpName>:<version>` (for a single
-service you may omit the `<service>.` prefix). DAppNode forces this tag. If
-your image is tagged differently, re-tag it before saving:
+The image tag MUST be exactly the tag DAppNode will require for that service.
+For one-service packages, use the full `dnpName` as the compose service key if
+you want the simple tag `<dnpName>:<version>`. If your service key is short
+(for example `web`), the expected tag is `web.<dnpName>:<version>`.
+
+The bundled [assets/templates/Makefile](assets/templates/Makefile) includes a
+`dev-tar` target that runs build -> re-tag -> save -> SHA-256 print for the
+single-service template. It auto-reads `dappnode_package.json` with Node; if
+Node is not available, pass `DNP_NAME`, `VERSION`, `SERVICE`, `CURRENT_IMAGE`,
+and `TARBALL` as `make` variables:
 
 ```bash
-docker tag <current-tag> <service>.<dnpName>:<version>
+make dev-tar
 ```
 
 ### 5. Upload the image
@@ -366,6 +411,22 @@ MCP-native chunked upload flow, especially when authenticating with
 
 `dappnode_finish_dev_image_upload` returns `imageFileId`. Use that value in
 `dappnode_install_dev_package`.
+
+If a tarball is too large to pass through your MCP client's tool-call UI, use
+the same bearer token with direct `curl` calls to `POST /mcp`; this is still the
+MCP chunked upload path, just driven by shell code instead of model-visible tool
+calls. A worked, macOS-compatible driver is in
+[references/upload-via-curl.md](references/upload-via-curl.md).
+
+Shell gotchas:
+
+- Do not build a huge JSON-RPC body as a shell argument, especially on macOS.
+  `curl --data-binary "$body"` will hit the process argv limit once the body is
+  large enough. Pipe the body through stdin and use `--data-binary @-`.
+- Do not store 1 MiB raw chunks as base64 lines you expect the model to read
+  back. Base64 expands them to about 1.4 MiB and many environments truncate
+  long lines or tool output.
+- Use standard padded base64 with no whitespace inside the JSON string.
 
 If you have an admin session cookie and direct network access to the node, you
 may instead POST the tarball to `<mcp-origin>/upload`, where `<mcp-origin>` is
@@ -399,7 +460,7 @@ dappnode_install_dev_package({
   manifest: <raw dappnode_package.json>,
   compose: <raw docker-compose.yml>,
   imageFileId: <fileId from upload>,
-  setupWizard?: <raw setup-wizard.yml>
+  setupWizard: <raw setup-wizard.yml, if the package has one>
 })
 ```
 
@@ -409,13 +470,40 @@ up with an avatar in the UI; in the future you will be able to upload a custom
 `avatar.png` and pass its fileId. This mutates state; confirm with the user
 before calling if you have not already.
 
+If the package has `setup-wizard.yml`, pass it on every dev install. The schema
+allows `setupWizard` to be optional only for packages that do not ship a wizard.
+
 ### 7. Verify on the real node
 
 Use the MCP read tools:
 
+- `dappnode_list_packages()` — poll until every package container reports
+  `running: true`.
 - `dappnode_get_package_details(<dnpName>)` — inspect state, ports, volumes.
 - `dappnode_get_package_logs(<dnpName>)` — read logs.
 - `curl` the package's DAppNode URL (`http://<service>.<dnpName-without-.eth>`).
+
+Treat `dappnode_install_dev_package` returning `{ ok: true }` as "the install
+request was accepted and the package may still be queued or starting", not as an
+application health check. After every install or re-install, poll
+`dappnode_list_packages` and `dappnode_get_package_logs` until the containers are
+running, logs are stable, and the package health endpoint or UI responds.
+
+Did the install actually run? Check all of these before calling it done:
+
+- `dappnode_list_packages()` includes the `dnpName`, expected `version`, and all
+  package containers have `running: true`.
+- `dappnode_get_package_logs(<dnpName>)` shows the current start, not a stale
+  previous run, and has no crash loop or fatal error.
+- `dappnode_get_package_details(<dnpName>)` shows the expected ports, volumes,
+  and container state.
+- The package's DAppNode URL or health endpoint responds over the real node
+  network.
+
+Named volumes are persistent across dev re-installs of the same package and
+volume names. Bumping `version` and running `dappnode_install_dev_package` again
+reuses the existing named volumes; it does not create a fresh empty data volume.
+Delete volumes only when you intentionally want to reset state.
 
 Fix any issues locally, rebuild, re-upload and call
 `dappnode_install_dev_package` again with the same name to replace it. If the
@@ -437,13 +525,16 @@ Remove the custom package from the DAppNode like any other package.
 Dev-time (offline, no IPFS):
 
 - `dappnode_validate_package` — validate manifest + compose + setup-wizard.
-  Call it on every iteration.
+  Call it on every iteration. Pass `manifest` as the raw JSON string to avoid
+  client/dispatcher quirks with already-parsed objects.
 - `dappnode_get_dev_upload_info` — return the MCP chunked-upload limits and
   the optional `/upload` endpoint details. Call this if you are unsure how to
   upload.
 - `dappnode_begin_dev_image_upload` / `dappnode_append_dev_image_upload_chunk`
   / `dappnode_finish_dev_image_upload` — upload a `docker save` tarball through
   MCP only, returning the `imageFileId` needed by `dappnode_install_dev_package`.
+  If model-visible tool calls cannot carry the base64 safely, drive the same
+  tools with direct JSON-RPC `curl` calls to `/mcp`.
 - `dappnode_abort_dev_image_upload` — cancel a failed or no-longer-needed
   MCP-native upload and delete its partial temp file.
 - `dappnode_install_dev_package` — install a locally-built package into the
@@ -510,9 +601,9 @@ Manifest:
 Compose:
 
 - **Image tag mismatch** — `image:` must be EXACTLY
-  `<service>.<dnpName>:<manifestVersion>` (single service may omit the service
-  prefix: `<dnpName>:<version>`). A wrong tag, wrong version, or a public image
-  name is rejected.
+  `<service>.<dnpName>:<manifestVersion>`, except when the compose service key
+  is exactly the full `dnpName`, where it is `<dnpName>:<version>`. A wrong tag,
+  wrong version, or a public image name in the saved tarball is rejected.
 - **`version` < 3.4** — minimum compose file version is 3.4.
 - **Non-whitelisted or non-external networks** — only `dncore_network`,
   `dnprivate_network`, `dnpublic_network`, and they must be `external: true`.
@@ -532,6 +623,12 @@ Networking / runtime:
   DNS `<service>.<name>.dappnode` (e.g. `http://geth.dappnode:8545`).
 - **Hardcoding host ports** — prefer container-only `ports: ["8080"]` and let the
   user/setup-wizard pick the host port.
+- **Confusing DNS/VPN reachability with package failure** — remote development
+  machines usually reach `*.dappnode` names over the DAppNode VPN
+  (WireGuard/utun on macOS). Sometimes DNS resolves a `*.dappnode` name but
+  `curl http://name.dappnode` cannot TCP-connect, while `curl http://<resolved-ip>`
+  works. In that case the package may be fine; check the resolved IP, VPN
+  interface/routes, and try the IP before debugging the container.
 
 Setup-wizard:
 
