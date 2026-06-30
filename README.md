@@ -42,7 +42,8 @@ skills/
 └── create-dappnode-package/
     ├── SKILL.md
     ├── agents/openai.yaml
-    └── assets/templates/
+    ├── assets/templates/
+    └── references/
 ```
 
 ## License
