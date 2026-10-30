@@ -1,16 +1,20 @@
 # DAppNode Agent Skills
 
-Agent skills for creating and maintaining DAppNode packages.
+Agent skills for creating, maintaining and testing DAppNode packages.
 
 ## Skills
 
 - `create-dappnode-package`: Create, develop, validate, upload, install, and
   debug a DAppNode package with a fast local Docker loop and DAppNode MCP
   validation.
+- `dappnode-e2e-test`: Deeply test a change to DAPPMANAGER or a core package on
+  a real test node, through the admin UI and on the host, and report whether it
+  is safe to merge or publish.
 
 ## Install
 
-Install the skill for Codex:
+Install a skill for Codex (replace `create-dappnode-package` with the skill you
+want):
 
 ```bash
 npx skills add dappnode/dappnode-agent-skills --skill create-dappnode-package -a codex
@@ -39,11 +43,16 @@ SKILL_BASE_URL=https://github.com/dappnode/dappnode-agent-skills/tree/main npx s
 
 ```text
 skills/
-└── create-dappnode-package/
+├── create-dappnode-package/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── assets/templates/
+│   └── references/
+└── dappnode-e2e-test/
     ├── SKILL.md
     ├── agents/openai.yaml
-    ├── assets/templates/
-    └── references/
+    ├── references/
+    └── scripts/
 ```
 
 ## License

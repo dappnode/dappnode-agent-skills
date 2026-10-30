@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dappnode E2E Test"
+  short_description: "Deep test a Dappnode change on a real node"
+  default_prompt: "Use $dappnode-e2e-test to test this change end to end on my test Dappnode and report whether it is safe to merge."
